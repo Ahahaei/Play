@@ -1,3 +1,4 @@
+from app.models.platform import AmazonCredentials, Platform
 from app.models.seller import (
     InventoryPolicy,
     OrderSpikePolicy,
@@ -6,10 +7,9 @@ from app.models.seller import (
     SellerPolicies,
     SellerStatus,
     SlackCredentials,
-    SpApiCredentials,
 )
 
-_PLACEHOLDER_CREDENTIALS = SpApiCredentials(
+_PLACEHOLDER_CREDENTIALS = AmazonCredentials(
     lwa_client_id="amzn1.application-oa2-client.PLACEHOLDER",
     lwa_client_secret="PLACEHOLDER_SECRET",
     lwa_refresh_token="Atzr|PLACEHOLDER_REFRESH_TOKEN",
@@ -24,7 +24,6 @@ MOCK_SELLERS: list[Seller] = [
         status=SellerStatus.ACTIVE,
         slack_channel_id="C0AJBKT8U1L",
         slack_user_id="U_MOCK_S001",
-        sp_api_credentials=_PLACEHOLDER_CREDENTIALS,
         slack_credentials=SlackCredentials(bot_token="xoxb-mock-s001-token"),
         policies=SellerPolicies(
             inventory_low=InventoryPolicy(
@@ -47,7 +46,6 @@ MOCK_SELLERS: list[Seller] = [
         status=SellerStatus.ACTIVE,
         slack_channel_id="C0AJBKT8U1L",
         slack_user_id="U_MOCK_S002",
-        sp_api_credentials=_PLACEHOLDER_CREDENTIALS,
         slack_credentials=SlackCredentials(bot_token="xoxb-mock-s002-token"),
         policies=SellerPolicies(
             inventory_low=InventoryPolicy(
@@ -70,7 +68,6 @@ MOCK_SELLERS: list[Seller] = [
         status=SellerStatus.INACTIVE,
         slack_channel_id="C_PLACEHOLDER_S003",
         slack_user_id="U_MOCK_S003",
-        sp_api_credentials=_PLACEHOLDER_CREDENTIALS,
         slack_credentials=SlackCredentials(bot_token="xoxb-mock-s003-token"),
         policies=SellerPolicies(
             inventory_low=InventoryPolicy(
@@ -84,4 +81,27 @@ MOCK_SELLERS: list[Seller] = [
             high_refund_rate=RefundRatePolicy(auto_approve_max_rate=0.10),
         ),
     ),
+]
+
+# Platform-native seller ids. Amazon's real ones are merchant tokens like
+# "ABCDEFGFMDKELDW"; these are deliberately recognisable as mocks.
+MOCK_PLATFORM_ACCOUNTS: list[dict] = [
+    {
+        "platform": Platform.AMAZON,
+        "external_id": "A_MOCK_S001",
+        "seller_id": "S001",
+        "credentials": _PLACEHOLDER_CREDENTIALS,
+    },
+    {
+        "platform": Platform.AMAZON,
+        "external_id": "A_MOCK_S002",
+        "seller_id": "S002",
+        "credentials": _PLACEHOLDER_CREDENTIALS,
+    },
+    {
+        "platform": Platform.AMAZON,
+        "external_id": "A_MOCK_S003",
+        "seller_id": "S003",
+        "credentials": _PLACEHOLDER_CREDENTIALS,
+    },
 ]

@@ -32,14 +32,6 @@ class SellerPolicies(BaseModel):
     high_refund_rate: RefundRatePolicy
 
 
-class SpApiCredentials(BaseModel):
-    lwa_client_id: str
-    lwa_client_secret: str
-    lwa_refresh_token: str
-    marketplace_id: str
-    endpoint: str  # e.g. "https://sandbox.sellingpartnerapi-fe.amazon.com"
-
-
 class SlackCredentials(BaseModel):
     bot_token: str
 
@@ -51,5 +43,6 @@ class Seller(BaseModel):
     policies: SellerPolicies
     slack_channel_id: Optional[str] = None  # notification channel for this seller
     slack_user_id: Optional[str] = None
-    sp_api_credentials: Optional[SpApiCredentials] = None
     slack_credentials: Optional[SlackCredentials] = None
+    # Platform credentials live on seller_platform_accounts — one row per
+    # (platform, external_id) — not here. See app/models/platform.py.

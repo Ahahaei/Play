@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from app import store
-from app.models.seller import SpApiCredentials
+from app.models.platform import AmazonCredentials, Platform
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
@@ -57,10 +57,17 @@ def authorize(
 def callback(
     state: str = Query(...),
     code: str = Query(None),
+    spapi_oauth_code: str = Query(None),
+    selling_partner_id: str = Query(
+        ...,
+        description="Amazon's merchant token for the authorizing seller — the "
+                    "id inbound notifications carry as SellerId.",
+    ),
     error: str = Query(None),
 ):
     if error:
         raise HTTPException(status_code=400, detail=f"Amazon authorization failed: {error}")
+    code = spapi_oauth_code or code
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code")
 
@@ -97,13 +104,20 @@ def callback(
     if not refresh_token:
         raise HTTPException(status_code=502, detail="No refresh_token in Amazon response")
 
-    credentials = SpApiCredentials(
+    credentials = AmazonCredentials(
         lwa_client_id=client_id,
         lwa_client_secret=client_secret,
         lwa_refresh_token=refresh_token,
         marketplace_id=marketplace_id,
         endpoint=endpoint,
     )
-    store.update_seller(seller_id, {"sp_api_credentials": credentials.model_dump(mode="json")})
+    # Keyed on the merchant token, not on our seller_id: that is what inbound
+    # pushes carry, so this is the row that resolves them back to a seller.
+    store.upsert_account(
+        platform=Platform.AMAZON,
+        external_id=selling_partner_id,
+        seller_id=seller_id,
+        credentials=credentials,
+    )
 
     return {"ok": True, "seller_id": seller_id, "message": "Amazon account connected successfully"}

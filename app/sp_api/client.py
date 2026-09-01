@@ -29,10 +29,7 @@ def _create_restock_order(seller, sku: str, quantity: int) -> dict:
             "quantity": quantity,
         }
 
-    creds = seller.sp_api_credentials
-    if creds is None:
-        raise ValueError(f"Seller '{seller.id}' has no SP API credentials configured")
-
+    creds = auth.amazon_credentials(seller)
     access_token = auth.get_access_token(seller)
 
     resp = httpx.post(
