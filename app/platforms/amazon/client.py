@@ -5,7 +5,7 @@ import httpx
 
 from app.models.decision import PolicyResult
 from app.models.intent import Intent
-from app.sp_api import auth
+from app.platforms.amazon import auth
 
 
 def execute_intent(intent: Intent, seller, payload: dict, policy_result: PolicyResult) -> dict:

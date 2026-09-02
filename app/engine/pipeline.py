@@ -19,7 +19,7 @@ def execute_approved(approval_id: str, resolved_by: str) -> None:
     event = store.get_event(approval.event_id)
     seller = store.get_seller(approval.seller_id)
     logger.info("approval=%s approved by %s — executing intent=%s", approval_id, resolved_by, approval.intent)
-    from app.sp_api import client as sp_api_client
+    from app.platforms.amazon import client as sp_api_client
     sp_result = sp_api_client.execute_intent(
         approval.intent,
         seller,
@@ -61,7 +61,7 @@ def run_pipeline(event_id: str) -> None:
         execution_result = executor.execute(policy_result)
 
         if execution_result.status == ExecutionStatus.EXECUTED:
-            from app.sp_api import client as sp_api_client
+            from app.platforms.amazon import client as sp_api_client
             sp_result = sp_api_client.execute_intent(intent, seller, record.payload, policy_result)
             execution_result = execution_result.model_copy(update={"sp_api_result": sp_result})
             logger.info("event=%s auto-executed sp_result=%s", event_id, sp_result)
