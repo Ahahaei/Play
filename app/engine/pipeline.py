@@ -9,8 +9,26 @@ from app.engine import classifier, executor
 from app.engine import policy as policy_engine
 from app.models.approval import ApprovalStatus, PendingApproval
 from app.models.decision import DecisionResult, ExecutionStatus
-from app.models.event import EVENT_LAYER_MAP, EventLayer
+from app.models.event import EVENT_LAYER_MAP, EventLayer, EventStatus
+from app.models.job import JobStatus
 from app.models.seller import SellerStatus
+
+
+def run_job(job_id: str, event_id: str) -> None:
+    """Run one job to completion and close it.
+
+    ⚠ TEMPORARY BRIDGE. Ingest now commits an event and a job together, but no
+    worker process claims jobs yet, so the routers still hand this to
+    `BackgroundTasks` — in-process, no retry, dies with the worker. Stage 4
+    replaces the caller with a claim loop; this function's body is what that
+    loop will run.
+    """
+    run_pipeline(event_id)
+    event = store.get_event(event_id)
+    if event is not None and event.status == EventStatus.FAILED:
+        store.finish_job(job_id, JobStatus.DEAD, error=event.error)
+    else:
+        store.finish_job(job_id, JobStatus.DONE)
 
 
 def execute_approved(approval_id: str, resolved_by: str) -> None:

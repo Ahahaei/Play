@@ -65,8 +65,8 @@ def test_agent_dispatches_reorder_sku(mock_get_client):
     mock_client.messages.create.side_effect = [tool_response, followup]
     mock_get_client.return_value = mock_client
 
-    with patch("app.llm.tool_handlers.run_pipeline"):
-        with patch("app.llm.tool_handlers.store.create_event"):
+    with patch("app.llm.tool_handlers.run_job"):
+        with patch("app.llm.tool_handlers.store.ingest_internal_event"):
             with patch("app.llm.tool_handlers.store.get_event") as mock_get_event:
                 from app.models.decision import DecisionResult, ExecutionResult, ExecutionStatus, PolicyResult, RiskLevel
                 from app.models.intent import Intent

@@ -1,11 +1,9 @@
 import logging
-import uuid
-from datetime import datetime, timezone
 
 from app import store
-from app.engine.pipeline import run_pipeline
+from app.engine.pipeline import run_job
 from app.models.decision import ExecutionStatus
-from app.models.event import EventRecord, EventStatus, EventType
+from app.models.event import EventStatus, EventType
 from app.models.seller import Seller
 
 logger = logging.getLogger(__name__)
@@ -16,22 +14,18 @@ def reorder_sku(sku: str, quantity: int, seller: Seller) -> str:
     Inject a manual reorder into the pipeline.
     The policy engine evaluates it against the seller's thresholds — auto-execute or escalate.
     """
-    event_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
-    record = EventRecord(
-        id=event_id,
-        seller_id=seller.id,
-        event_type=EventType.INVENTORY_LOW,
+    # Entry 2 of the ingest diagram: the same event + job insert pair the
+    # platform route performs. Still run inline — Stage 4 hands it to the
+    # worker and replies with an acknowledgement instead of a result.
+    enqueued = store.ingest_internal_event(
+        seller.id,
+        EventType.INVENTORY_LOW,
         # requested_quantity overrides the seller's default reorder_quantity in the policy engine
-        payload={"sku": sku, "current_quantity": 0, "requested_quantity": quantity},
-        status=EventStatus.PENDING,
-        created_at=now,
-        updated_at=now,
+        {"sku": sku, "current_quantity": 0, "requested_quantity": quantity},
     )
-    store.create_event(record)
-    run_pipeline(event_id)
+    run_job(enqueued.job_id, enqueued.event_id)
 
-    event = store.get_event(event_id)
+    event = store.get_event(enqueued.event_id)
     if event.status == EventStatus.FAILED:
         return f"Failed to process reorder: {event.error}"
 

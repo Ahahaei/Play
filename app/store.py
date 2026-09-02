@@ -3,13 +3,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
+from typing import Sequence
+
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.engine import SessionLocal
-from app.db.models import ApprovalRow, EventRow, SellerPlatformAccountRow, SellerRow
+from app.db.models import ApprovalRow, EventRow, JobRow, SellerPlatformAccountRow, SellerRow
 from app.models.approval import ApprovalStatus, PendingApproval
 from app.models.decision import DecisionResult
 from app.models.event import EventRecord, EventStatus, EventType
+from app.models.job import EnqueuedEvent, Job, JobKind, JobStatus
 from app.models.platform import Platform, PlatformAccount
 from app.models.seller import Seller
 
@@ -67,6 +72,23 @@ def _event_from_row(row: EventRow) -> EventRecord:
         "status": row.status,
         "result": row.result,
         "error": row.error,
+        "created_at": _ensure_utc(row.created_at),
+        "updated_at": _ensure_utc(row.updated_at),
+    })
+
+
+def _job_from_row(row: JobRow) -> Job:
+    return Job.model_validate({
+        "id": row.id,
+        "event_id": row.event_id,
+        "seller_id": row.seller_id,
+        "kind": row.kind,
+        "status": row.status,
+        "attempts": row.attempts,
+        "run_after": _ensure_utc(row.run_after),
+        "locked_at": _ensure_utc(row.locked_at),
+        "target_quantity": row.target_quantity,
+        "last_error": row.last_error,
         "created_at": _ensure_utc(row.created_at),
         "updated_at": _ensure_utc(row.updated_at),
     })
@@ -228,6 +250,139 @@ def create_event(record: EventRecord) -> None:
             updated_at=record.updated_at,
         ))
 
+
+# --- Ingest: event + job in one transaction ---
+#
+# The whole point of this section is atomicity. An event row that commits
+# without its job is work the system has accepted and will never do; a job
+# without its event is a worker crash. They go together or neither goes.
+
+def _insert_event_skipping_duplicates(db, values: dict) -> Optional[str]:
+    """INSERT ... ON CONFLICT (platform, dedup_key) DO NOTHING RETURNING id.
+
+    Returns None when the row already existed — a redelivery. A NULL
+    `dedup_key` never conflicts (NULLs are distinct), so internally-originated
+    events are always inserted.
+    """
+    insert = pg_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
+    stmt = (
+        insert(EventRow.__table__)
+        .values(**values)
+        .on_conflict_do_nothing(index_elements=["platform", "dedup_key"])
+        .returning(EventRow.__table__.c.id)
+    )
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def _insert_job(db, event_id: str, seller_id: str, now: datetime) -> str:
+    job_id = str(uuid.uuid4())
+    db.add(JobRow(
+        id=job_id,
+        event_id=event_id,
+        seller_id=seller_id,
+        kind=JobKind.PIPELINE.value,
+        status=JobStatus.PENDING.value,
+        attempts=0,
+        run_after=now,
+        created_at=now,
+        updated_at=now,
+    ))
+    return job_id
+
+
+def ingest_delivery(
+    seller_id: str,
+    platform: Platform,
+    events: Sequence,
+) -> list[EnqueuedEvent]:
+    """Store a verified, normalized platform delivery.
+
+    `events` are `NormalizedEvent`s from an adapter. Duplicates are dropped
+    silently and produce no job, which is what makes an at-least-once
+    redelivery a no-op rather than a second order.
+    """
+    platform_value = Platform(platform).value
+    now = datetime.now(timezone.utc)
+    enqueued: list[EnqueuedEvent] = []
+    with _session() as db:
+        for event in events:
+            event_id = _insert_event_skipping_duplicates(db, {
+                "id": str(uuid.uuid4()),
+                "seller_id": seller_id,
+                "event_type": event.event_type.value,
+                "payload": event.payload,
+                "status": EventStatus.PENDING.value,
+                "platform": platform_value,
+                "dedup_key": event.dedup_key,
+                "raw_payload": event.raw_payload,
+                "created_at": now,
+                "updated_at": now,
+            })
+            if event_id is None:
+                continue
+            enqueued.append(EnqueuedEvent(
+                event_id=event_id,
+                job_id=_insert_job(db, event_id, seller_id, now),
+            ))
+    return enqueued
+
+
+def ingest_internal_event(
+    seller_id: str,
+    event_type: EventType,
+    payload: dict,
+) -> EnqueuedEvent:
+    """Store an event that did not arrive from a platform.
+
+    The internal endpoints and the chat tool. No `platform`, so no delivery
+    dedup — these are deduplicated at their own source (Slack's `event_id`),
+    not here.
+    """
+    now = datetime.now(timezone.utc)
+    event_id = str(uuid.uuid4())
+    with _session() as db:
+        db.add(EventRow(
+            id=event_id,
+            seller_id=seller_id,
+            event_type=event_type.value,
+            payload=payload,
+            status=EventStatus.PENDING.value,
+            created_at=now,
+            updated_at=now,
+        ))
+        db.flush()
+        job_id = _insert_job(db, event_id, seller_id, now)
+    return EnqueuedEvent(event_id=event_id, job_id=job_id)
+
+
+# --- Jobs ---
+
+def get_job(job_id: str) -> Optional[Job]:
+    with _session() as db:
+        row = db.get(JobRow, job_id)
+        return _job_from_row(row) if row else None
+
+
+def get_jobs_for_event(event_id: str) -> list[Job]:
+    with _session() as db:
+        rows = db.execute(
+            select(JobRow).where(JobRow.event_id == event_id)
+        ).scalars().all()
+        return [_job_from_row(row) for row in rows]
+
+
+def finish_job(job_id: str, status: JobStatus, error: Optional[str] = None) -> None:
+    with _session() as db:
+        row = db.get(JobRow, job_id)
+        if row is None:
+            return
+        row.status = status.value
+        row.last_error = error
+        row.locked_at = None
+        row.updated_at = datetime.now(timezone.utc)
+
+
+# --- Events ---
 
 def get_event(event_id: str) -> Optional[EventRecord]:
     with _session() as db:
