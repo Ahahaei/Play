@@ -2,13 +2,20 @@
 Investigation tools for the cross-event correlation agent.
 
 These are read-only — they surface evidence from the events and approvals tables so the
-agent can correlate signals across event types. Nothing here executes a decision; the two
-terminal tools (submit_insight / no_insight) carry no implementation because the graph's
-conclude node handles them directly.
+agent can correlate signals across event types. Nothing here executes a decision, and there
+is deliberately no path from this module to any write: the agent can look, never touch.
+
+Two consumers, one source of truth for the tool descriptions:
+  - `execute_tool` — plain dispatch, used by tests and any raw-Anthropic-SDK caller.
+  - `build_tools(seller_id)` — the same four handlers wrapped as LangChain tools for the
+    deepagents harness, with seller_id bound by closure so the model can never supply it.
 """
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
+
+from langchain_core.tools import BaseTool, StructuredTool
+from pydantic import BaseModel, Field
 
 from app import store
 from app.models.event import MONITORING_EVENT_TYPES, EventRecord
@@ -98,61 +105,54 @@ CORRELATION_TOOLS: list[dict] = [
             },
         },
     },
-    {
-        "name": "submit_insight",
-        "description": (
-            "Report a finding to the seller and end the investigation. Only call this when the "
-            "evidence shows something that no single event reveals on its own — a correlation "
-            "across signals, a recurring pattern, or a reason to hold off on an in-flight action. "
-            "Restating one event is not an insight; use no_insight instead."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": (
-                        "The finding in plain language: what the signals are, why they are connected, "
-                        "and what the seller should do about it."
-                    ),
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": list(SEVERITIES),
-                    "description": (
-                        "info — worth knowing; warning — needs attention soon; "
-                        "critical — acting on the wrong assumption right now costs money."
-                    ),
-                },
-                "evidence_refs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "IDs of the events this conclusion rests on.",
-                },
-            },
-            "required": ["summary", "severity", "evidence_refs"],
-        },
-    },
-    {
-        "name": "no_insight",
-        "description": (
-            "End the investigation without reporting anything. Call this when the signals are "
-            "unrelated, routine, or explained on their own. Silence is the correct outcome most "
-            "of the time — do not manufacture a finding to justify the investigation."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Brief note on why nothing was worth reporting. Logged, never sent to the seller.",
-                },
-            },
-        },
-    },
 ]
 
-TERMINAL_TOOLS = {"submit_insight", "no_insight"}
+
+class InvestigationVerdict(BaseModel):
+    """
+    The agent's final answer, returned as structured output rather than via a terminal tool.
+
+    The deepagents harness ends a run when the model stops calling tools, and RubricMiddleware
+    grades the transcript at exactly that moment. A terminal tool call would mean the agent
+    never "finished", so the validator would never fire — which is why the earlier
+    submit_insight / no_insight tools were replaced by this model. `should_report=False` is
+    the old no_insight.
+    """
+
+    should_report: bool = Field(
+        description=(
+            "True only if the evidence shows something no single event reveals on its own. "
+            "False when the signals are unrelated, routine, or independently explained — "
+            "which is the correct outcome most of the time."
+        )
+    )
+    severity: Literal["info", "warning", "critical"] = Field(
+        default="info",
+        description=(
+            "info — worth knowing; warning — needs attention soon; "
+            "critical — acting on the wrong assumption right now costs money."
+        ),
+    )
+    summary: str = Field(
+        default="",
+        description=(
+            "The finding in plain language: what the signals are, why they are connected, and "
+            "what the seller should do about it. Empty when should_report is False."
+        ),
+    )
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs of the events this conclusion rests on, exactly as they appeared in tool "
+            "results. Never invent an ID."
+        ),
+    )
+    no_report_reason: str = Field(
+        default="",
+        description=(
+            "When should_report is False, why. Recorded for evaluation, never sent to the seller."
+        ),
+    )
 
 # Payload keys rendered in the compact event lines; everything else needs get_event_detail.
 _SUMMARY_KEYS = (
@@ -305,3 +305,37 @@ def execute_tool(name: str, tool_input: dict, seller_id: str) -> str:
     except Exception as exc:
         logger.exception("seller=%s tool=%s failed: %s", seller_id, name, exc)
         return f"Tool '{name}' failed: {exc}"
+
+
+def build_tools(seller_id: str) -> list[BaseTool]:
+    """
+    Wrap the four investigation handlers as LangChain tools for the deepagents harness.
+
+    `seller_id` is bound here by closure and appears in no tool schema, so the model has no
+    way to ask for another tenant's data — the same guarantee `execute_tool` gets by keeping
+    seller_id positional. Descriptions come from CORRELATION_TOOLS so the two call paths
+    can never drift apart. Build a fresh list per investigation.
+    """
+    descriptions = {tool["name"]: tool["description"] for tool in CORRELATION_TOOLS}
+
+    def _query_events(event_type: Optional[str] = None, hours: int = 24) -> str:
+        return query_events(seller_id, event_type=event_type, hours=hours)
+
+    def _get_event_detail(event_id: str) -> str:
+        return get_event_detail(seller_id, event_id)
+
+    def _get_sku_history(sku: str, days: int = 14) -> str:
+        return get_sku_history(seller_id, sku, days=days)
+
+    def _check_pending_approvals(sku: Optional[str] = None) -> str:
+        return check_pending_approvals(seller_id, sku=sku)
+
+    return [
+        StructuredTool.from_function(func=fn, name=name, description=descriptions[name])
+        for name, fn in (
+            ("query_events", _query_events),
+            ("get_event_detail", _get_event_detail),
+            ("get_sku_history", _get_sku_history),
+            ("check_pending_approvals", _check_pending_approvals),
+        )
+    ]

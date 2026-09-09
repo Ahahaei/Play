@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app import store
 from app.llm import correlation_tools as ct
 from app.models.approval import ApprovalStatus, PendingApproval
@@ -72,16 +74,21 @@ def _approval(approval_id: str, event_id: str, seller_id: str = "S001") -> None:
 
 # --- tool schemas ---
 
-def test_all_six_tools_are_defined():
+def test_the_four_investigation_tools_are_defined():
     names = [t["name"] for t in ct.CORRELATION_TOOLS]
     assert names == [
         "query_events",
         "get_event_detail",
         "get_sku_history",
         "check_pending_approvals",
-        "submit_insight",
-        "no_insight",
     ]
+
+
+def test_no_tool_can_write():
+    # The agent looks, never touches. A write tool appearing here is a design regression.
+    forbidden = ("reorder", "approve", "reject", "execute", "submit", "create", "update", "delete")
+    for tool in ct.CORRELATION_TOOLS:
+        assert not any(word in tool["name"] for word in forbidden), tool["name"]
 
 
 def test_every_tool_has_name_description_and_schema():
@@ -90,15 +97,6 @@ def test_every_tool_has_name_description_and_schema():
         assert tool["description"]
         assert tool["input_schema"]["type"] == "object"
         assert "properties" in tool["input_schema"]
-
-
-def test_terminal_tools_are_marked():
-    assert ct.TERMINAL_TOOLS == {"submit_insight", "no_insight"}
-
-
-def test_submit_insight_severity_enum_matches_constant():
-    tool = next(t for t in ct.CORRELATION_TOOLS if t["name"] == "submit_insight")
-    assert tool["input_schema"]["properties"]["severity"]["enum"] == list(ct.SEVERITIES)
 
 
 def test_query_events_type_enum_only_offers_monitoring_types():
@@ -263,11 +261,6 @@ def test_execute_tool_unknown_tool():
     assert "Unknown tool" in ct.execute_tool("drop_tables", {}, "S001")
 
 
-def test_execute_tool_rejects_terminal_tools():
-    # Terminal tools are the graph's business — dispatching one here is a bug, not a query.
-    assert "Unknown tool" in ct.execute_tool("submit_insight", {}, "S001")
-
-
 def test_execute_tool_bad_arguments_returns_text_not_raise():
     result = ct.execute_tool("get_sku_history", {"wrong_arg": 1}, "S001")
     assert "Invalid arguments" in result
@@ -279,3 +272,108 @@ def test_execute_tool_cannot_be_told_which_seller_to_read():
     result = ct.execute_tool("query_events", {"seller_id": "S002"}, "S001")
     assert "Invalid arguments" in result
     assert "[ev-s002]" not in result
+
+
+# --- build_tools (LangChain adapters for the deepagents harness) ---
+
+def test_build_tools_returns_the_four_investigation_tools():
+    names = [t.name for t in ct.build_tools("S001")]
+    assert names == [
+        "query_events",
+        "get_event_detail",
+        "get_sku_history",
+        "check_pending_approvals",
+    ]
+
+
+def test_build_tools_descriptions_come_from_correlation_tools():
+    # One source of truth — the two call paths must not drift apart.
+    expected = {t["name"]: t["description"] for t in ct.CORRELATION_TOOLS}
+    for tool in ct.build_tools("S001"):
+        assert tool.description == expected[tool.name]
+
+
+def test_build_tools_schema_never_exposes_seller_id():
+    # This is the tenant-isolation guarantee: the model cannot name a seller, so it
+    # cannot ask for another tenant's data.
+    for tool in ct.build_tools("S001"):
+        assert "seller_id" not in tool.args
+
+
+def test_build_tools_are_bound_to_their_seller():
+    _event("ev-s001", seller_id="S001")
+    _event("ev-s002", seller_id="S002")
+
+    query = next(t for t in ct.build_tools("S001") if t.name == "query_events")
+    result = query.invoke({"hours": 24})
+
+    assert "[ev-s001]" in result
+    assert "[ev-s002]" not in result
+
+
+def test_build_tools_two_sellers_stay_isolated():
+    _event("ev-s001", seller_id="S001")
+    _event("ev-s002", seller_id="S002")
+
+    s001 = next(t for t in ct.build_tools("S001") if t.name == "query_events")
+    s002 = next(t for t in ct.build_tools("S002") if t.name == "query_events")
+
+    assert "[ev-s002]" not in s001.invoke({"hours": 24})
+    assert "[ev-s001]" not in s002.invoke({"hours": 24})
+
+
+def test_build_tools_apply_defaults_when_args_omitted():
+    _event("ev-a")
+    query = next(t for t in ct.build_tools("S001") if t.name == "query_events")
+    assert "[ev-a]" in query.invoke({})
+
+
+def test_build_tools_pass_arguments_through():
+    _event("ev-inv", EventType.INVENTORY_LOW)
+    _event("ev-refund", EventType.HIGH_REFUND_RATE_DETECTED, payload={"refund_rate": 0.08})
+
+    query = next(t for t in ct.build_tools("S001") if t.name == "query_events")
+    result = query.invoke({"event_type": "high_refund_rate_detected", "hours": 24})
+
+    assert "[ev-refund]" in result
+    assert "[ev-inv]" not in result
+
+
+def test_build_tools_get_event_detail_refuses_cross_tenant_read():
+    _event("ev-s002", seller_id="S002", payload={"sku": "SECRET-SKU"})
+    detail = next(t for t in ct.build_tools("S001") if t.name == "get_event_detail")
+    result = detail.invoke({"event_id": "ev-s002"})
+    assert "No event found" in result
+    assert "SECRET-SKU" not in result
+
+
+# --- InvestigationVerdict (structured output, replaces the terminal tools) ---
+
+def test_verdict_requires_only_should_report():
+    verdict = ct.InvestigationVerdict(should_report=False)
+    assert verdict.should_report is False
+    assert verdict.severity == "info"
+    assert verdict.summary == ""
+    assert verdict.evidence_refs == []
+
+
+def test_verdict_severity_choices_match_severities_constant():
+    import typing
+    field = ct.InvestigationVerdict.model_fields["severity"]
+    assert set(typing.get_args(field.annotation)) == set(ct.SEVERITIES)
+
+
+def test_verdict_rejects_unknown_severity():
+    import pydantic
+    with pytest.raises(pydantic.ValidationError):
+        ct.InvestigationVerdict(should_report=True, severity="catastrophic")
+
+
+def test_verdict_round_trips_a_reportable_finding():
+    verdict = ct.InvestigationVerdict(
+        should_report=True,
+        severity="warning",
+        summary="Refunds and low stock on WIDGET-42 point to a quality fault.",
+        evidence_refs=["evt-9c21", "evt-7f3a"],
+    )
+    assert verdict.model_dump()["evidence_refs"] == ["evt-9c21", "evt-7f3a"]
