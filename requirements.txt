@@ -7,5 +7,15 @@ python-dotenv>=1.0.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
 alembic>=1.13.0
-anthropic>=0.40.0
+anthropic>=0.120.0
 python-multipart>=0.0.9
+
+# Cross-event investigation agent (deepagents harness on LangGraph)
+deepagents>=0.7.13,<0.8
+langgraph>=1.2.11,<2
+langchain-anthropic>=1.7.1,<2
+
+# Agent evaluation suite
+agentevals>=0.0.8
+openevals>=0.1.0
+langsmith>=0.3.13

@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
@@ -235,6 +235,38 @@ def get_recent_events_by_type(
             .limit(limit)
         ).scalars().all()
         return [_event_from_row(row) for row in rows]
+
+
+def get_recent_events_for_seller(
+    seller_id: str, hours: int, limit: int = 50
+) -> list[EventRecord]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    with _session() as db:
+        rows = db.execute(
+            select(EventRow)
+            .where(EventRow.seller_id == seller_id)
+            .where(EventRow.status == EventStatus.COMPLETED.value)
+            .where(EventRow.created_at >= cutoff)
+            .order_by(EventRow.created_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [_event_from_row(row) for row in rows]
+
+
+def get_events_by_sku(
+    seller_id: str, sku: str, days: int, limit: int = 50
+) -> list[EventRecord]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    with _session() as db:
+        rows = db.execute(
+            select(EventRow)
+            .where(EventRow.seller_id == seller_id)
+            .where(EventRow.status == EventStatus.COMPLETED.value)
+            .where(EventRow.created_at >= cutoff)
+            .order_by(EventRow.created_at.desc())
+        ).scalars().all()
+        matching = [_event_from_row(row) for row in rows if row.payload.get("sku") == sku]
+        return matching[:limit]
 
 
 def set_event_sp_api_result(event_id: str, sp_result: dict) -> None:
